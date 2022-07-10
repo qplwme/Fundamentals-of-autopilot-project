@@ -1,0 +1,79 @@
+clc;clear all
+
+init_mpcc
+
+%% Simulation
+for i = 1: simN
+    
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%% MPCC-Call %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
+    % augment state and inputs by shifting previus optimal solution
+    [x,u] = augState(x,u,x0,MPC_vars,ModelParams,tl);
+    %  formulate MPCC problem and solve it
+    if QP_iter == 0
+        [x, u, b, exitflag,info] = optimizer_mpcc(TrackMPC,MPC_vars,ModelParams, n_cars, Y, x, u, x0, uprev);
+        qpTime_log(i) = info.QPtime;
+    elseif QP_iter == 1
+        % doing multiple "SQP" steps
+        for k = 1:2
+            [x, u, b, exitflag,info] = optimizer_mpcc(TrackMPC,MPC_vars,ModelParams, n_cars, Y, x, u, x0, uprev);
+            qpTime_log(i) = qpTime_log(i) + info.QPtime;
+        end
+    elseif QP_iter == 2
+        % doing multiple damped "SQP" steps
+        for k = 1:2
+            Iter_damping = 0.75; % 0 no damping
+            [x_up, u_up, b, exitflag,info] = optimizer_mpcc(TrackMPC,MPC_vars,ModelParams, n_cars, Y, x, u, x0, uprev);
+            x = Iter_damping*x + (1-Iter_damping)*x_up;
+            u = Iter_damping*u + (1-Iter_damping)*u_up;
+            qpTime_log(i) = qpTime_log(i) + info.QPtime;
+        end
+    else
+        error('invalid QP_iter value')
+    end
+
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%% simulate system %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
+    x0 = SimTimeStep(x(:,1),u(:,1),Ts,ModelParams)';
+    x0 = unWrapX0(x0);
+    [ theta, last_closestIdx] = findTheta(x0,track.center,traj.ppx.breaks,trackWidth,last_closestIdx);
+    x0(ModelParams.stateindex_theta) = theta;
+    uprev = u(:,1);
+    
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%% plotting and logging %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    if plotOn == 1
+        PlotPrediction(x,u,b,Y,track,track,traj,MPC_vars,ModelParams)
+    end
+    
+    % log predictions and time
+    X_log(:,i) = reshape(x,(N+1)*7,1);
+    U_log(:,i) = reshape(u,(N)*3,1);
+    B_log(:,i) = reshape(b,N*4,1);
+    
+    if [line_k -1] * [X_log(1,i); 1; X_log(2,i)] > 0 && X_log(1,i) < 0
+        break
+    end
+end
+
+
+PlotLog(X_log(:, 1:i),U_log(:, 1:i),Y,track_origin,track_origin,i,Ts)
+
+traj_mpcc = X_log(1:2,1:i);
+v_mpcc = [traj_mpcc(1,2:i)-traj_mpcc(1,1:i-1); traj_mpcc(2,2:i)-traj_mpcc(2,1:i-1)] / Ts;
+v_mpcc(:,i) = v_mpcc(:,i-1);
+a_mpcc = [v_mpcc(1,2:i-1)-v_mpcc(1,1:i-2); v_mpcc(2,2:i-1)-v_mpcc(2,1:i-2)] / Ts;
+a_mpcc(:,i-1) = a_mpcc(:,i-2);
+a_mpcc(:,i) = a_mpcc(:,i-2);
+
+curv_mpcc = (v_mpcc(1,:).*a_mpcc(2,:) - v_mpcc(2,:).*a_mpcc(1,:)) ./ ...
+    (v_mpcc(1,:).^2 + v_mpcc(2,:).^2).^(3/2);
+
+phi_mpcc = atan2(v_mpcc(2,1:i-1), v_mpcc(1,1:i-1));
+phi_mpcc(:,i) = phi_mpcc(:,i-1);
